@@ -1,67 +1,71 @@
 # Caddy Auth Proxy
 
-A lightweight Caddy-based authentication proxy that protects upstream services with Basic Auth. Designed to run behind a TLS-terminating edge (e.g., Railway, Cloudflare) and proxy to internal services.
-
-## Use Case
-
-Protect an internal service with basic authentication before exposing it publicly:
+Fork of [rubenszinho/caddy-zero-trust](https://github.com/rubenszinho/caddy-zero-trust) used by
+[Sudanstorebh/mtgrsd](https://github.com/Sudanstorebh/mtgrsd) as the Railway
+`caddy-auth-proxy` service in front of staging (`staging.mtgr-sd.com`).
 
 ```
-User (HTTPS) → Edge/PaaS (TLS) → Caddy (Basic Auth) → Internal Service
+Browser → Cloudflare → this proxy (basic auth, with PUBLIC_PATHS bypass)
+                     → upstream (e.g. mtgrsd.railway.internal:3000)
 ```
 
-The upstream service has no public access. Caddy is the only entry point and enforces authentication.
+The app’s raw `*.up.railway.app` origin stays **ungated** and is what external
+monitors, QStash crons, and provider **webhooks** should keep using.
 
 ## Features
 
-- Basic Authentication via environment variables
-- Automatic password hashing at startup (plain password in, bcrypt hash generated)
-- Lightweight Alpine-based image
-- Works behind TLS-terminating proxies (Railway, Cloudflare, etc.)
+- Basic authentication via `AUTH_USER` / `AUTH_PASS` (bcrypt-hashed at boot)
+- Optional **path exemptions** via `PUBLIC_PATHS` (comma-separated Caddy `path` matchers)
+- `/api/health` is always public so container healthchecks work without credentials
+- Accepts `UPSTREAM_URL` as `host:port` or full `http(s)://…` URL
+- Designed to sit behind a TLS-terminating edge (Railway, Cloudflare)
 
 ## Configuration
 
-| Environment Variable | Description                          | Example                        | Required |
-| -------------------- | ------------------------------------ | ------------------------------ | -------- |
-| `AUTH_USER`          | Basic auth username                  | `admin`                        | Yes      |
-| `AUTH_PASS`          | Plain text password (hashed at boot) | `mysecurepassword`             | Yes      |
-| `UPSTREAM_URL`       | Backend service URL with port        | `http://backend.internal:5555` | Yes      |
+| Variable | Required | Description |
+| --- | --- | --- |
+| `AUTH_USER` | yes | Basic-auth username |
+| `AUTH_PASS` | yes | Plain password (hashed at boot into the in-memory Caddyfile) |
+| `UPSTREAM_URL` | yes | Upstream `host:port` or URL |
+| `PUBLIC_PATHS` | no | Comma-separated absolute path matchers skipped by basic auth |
 
-## Usage
+### Recommended `PUBLIC_PATHS` for mtgrsd staging
 
-### Build
+Exempt Didit’s browser return URL **and** everything the SPA needs to render
+and call the API without a second basic-auth prompt. App-level auth still
+applies. Keep `/cron/*` gated here (QStash targets the ungated origin).
+
+```
+/kyc/callback,/kyc/callback/*,/assets/*,/api/*,/webhooks/*,/auth/*,/manifest.json,/sw.js,/favicon.ico,/robots.txt,/sitemap.xml
+```
+
+## Railway
+
+1. Connect this repo as the service source (branch `main`, **empty** root directory).
+2. Set `AUTH_USER`, `AUTH_PASS`, `UPSTREAM_URL`, and `PUBLIC_PATHS`.
+3. Custom domain on port **80**.
+4. After deploy:
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}\n" https://<domain>/kyc/callback  # 200
+curl -sS -o /dev/null -w "%{http_code}\n" https://<domain>/             # 401
+curl -sS -o /dev/null -w "%{http_code}\n" https://<domain>/api/health   # 200
+```
+
+Then point `DIDIT_CALLBACK_URL` at `https://<domain>/kyc/callback`. Leave
+`POST /webhooks/didit` on the ungated origin.
+
+## Local run
 
 ```bash
 docker build -t caddy-auth-proxy .
-```
-
-### Run
-
-```bash
-docker run -d \
-  -e AUTH_USER=admin \
-  -e AUTH_PASS=mysecurepassword \
-  -e UPSTREAM_URL=http://your-backend:8080 \
-  -p 80:80 \
+docker run --rm -p 8080:80 \
+  -e AUTH_USER=dev -e AUTH_PASS=dev \
+  -e UPSTREAM_URL=host.docker.internal:3000 \
+  -e PUBLIC_PATHS='/kyc/callback,/assets/*,/api/*' \
   caddy-auth-proxy
 ```
 
-### Railway Deployment
-
-1. Deploy this repo to Railway
-2. Set environment variables: `AUTH_USER`, `AUTH_PASS`, `UPSTREAM_URL`
-3. Add custom domain pointing to port 80
-4. Caddy proxies authenticated requests to your internal service
-
-## Files
-
-- `Dockerfile` - Builds image with Python/bcrypt for password hashing
-- `Caddyfile` - Caddy config with Basic Auth and reverse proxy
-- `entrypoint.sh` - Hashes password at startup, then runs Caddy
-- `site/` - Static files (optional)
-
 ## License
 
-See [LICENSE](LICENSE) for details.
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/caddy-auth-proxy?referralCode=5oF91f&utm_medium=integration&utm_source=template&utm_campaign=generic)
+GPL-3.0 (inherited from upstream). See [LICENSE](LICENSE).
