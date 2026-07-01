@@ -10,9 +10,8 @@ if [ -z "${AUTH_USER}" ] || [ -z "${AUTH_PASS}" ] || [ -z "${UPSTREAM_URL}" ]; t
   exit 1
 fi
 
-# Hash via env (not interpolated into python -c). Export so the Caddyfile can
-# reference {$AUTH_PASS_HASH} — inlining $2a$… would be parsed as Caddy
-# placeholders and corrupt the bcrypt hash.
+# Export so the Caddyfile can use {$AUTH_PASS_HASH} — inlining $2a$… is parsed
+# as Caddy placeholders and corrupts the bcrypt hash.
 export AUTH_PASS_HASH="$(
   AUTH_PASS="$AUTH_PASS" python3 - <<'PY'
 import bcrypt, os
@@ -26,9 +25,9 @@ case "$UPSTREAM_URL" in
   *) UPSTREAM="http://$UPSTREAM_URL" ;;
 esac
 
-# Build a single `path a b c` matcher line (OR semantics). Always include
-# /api/health for container healthchecks without credentials.
-PATH_ARGS="/api/health"
+# Paths that skip basic auth. Always include /api/health (upstream liveness
+# for operators) and /_proxy_health (local 200 for Railway container checks).
+PATH_ARGS="/_proxy_health /api/health"
 if [ -n "${PUBLIC_PATHS:-}" ]; then
   OLD_IFS=$IFS
   IFS=','
@@ -48,30 +47,31 @@ if [ -n "${PUBLIC_PATHS:-}" ]; then
         exit 1
         ;;
     esac
-    # Skip duplicate of the always-public health path.
-    [ "$p" = "/api/health" ] && continue
+    case "$p" in
+      /_proxy_health|/api/health) continue ;;
+    esac
     PATH_ARGS="${PATH_ARGS} ${p}"
   done
   IFS=$OLD_IFS
 fi
 
 CONFIG_PATH="/tmp/Caddyfile"
+# Invert the matcher: basic_auth only on non-public paths, then one shared
+# reverse_proxy. Local /_proxy_health responds 200 without hitting upstream.
 cat > "$CONFIG_PATH" <<CADDY
 :80 {
-	@public path ${PATH_ARGS}
-
-	handle @public {
-		reverse_proxy ${UPSTREAM}
+	handle /_proxy_health {
+		respond "ok" 200
 	}
 
-	handle {
-		basic_auth {
-			{\$AUTH_USER} {\$AUTH_PASS_HASH}
-		}
-		reverse_proxy ${UPSTREAM}
+	@protected not path ${PATH_ARGS}
+	basic_auth @protected {
+		{\$AUTH_USER} {\$AUTH_PASS_HASH}
 	}
+
+	reverse_proxy ${UPSTREAM}
 }
 CADDY
 
-echo "caddy-auth-proxy: starting (public paths: ${PUBLIC_PATHS:-<none>})"
+echo "caddy-auth-proxy: starting (public paths: ${PATH_ARGS})"
 exec caddy run --config "$CONFIG_PATH" --adapter caddyfile
