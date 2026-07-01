@@ -43,8 +43,10 @@ applies. Keep `/cron/*` gated here (QStash targets the ungated origin).
 
 1. Connect this repo as the service source (branch `main`, **empty** root directory).
 2. Set `AUTH_USER`, `AUTH_PASS`, `UPSTREAM_URL`, and `PUBLIC_PATHS`.
-3. Custom domain on port **80**.
-4. After deploy:
+3. Custom domain on port **80** (the proxy **binds `:80`**, not `$PORT` — Railway's domain mapping for this service targets 80).
+4. Grant the [Railway GitHub App](https://github.com/organizations/Sudanstorebh/settings/installations/125727221) access to this repo (installation is `selected` repos only), then connect source `Sudanstorebh/caddy-zero-trust@main` with an **empty** root directory. Until then, deploys use `railway up` from a local clone.
+5. After deploy:
+After deploy:
 
 ```bash
 curl -sS -o /dev/null -w "%{http_code}\n" https://<domain>/kyc/callback  # 200
