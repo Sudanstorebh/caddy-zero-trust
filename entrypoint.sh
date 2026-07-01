@@ -10,9 +10,10 @@ if [ -z "${AUTH_USER}" ] || [ -z "${AUTH_PASS}" ] || [ -z "${UPSTREAM_URL}" ]; t
   exit 1
 fi
 
-# Hash without interpolating AUTH_PASS into the Python source (avoids quoting
-# bugs and keeps the plain secret out of `ps` argv for the python one-liner).
-AUTH_PASS_HASH="$(
+# Hash via env (not interpolated into python -c). Export so the Caddyfile can
+# reference {$AUTH_PASS_HASH} — inlining $2a$… would be parsed as Caddy
+# placeholders and corrupt the bcrypt hash.
+export AUTH_PASS_HASH="$(
   AUTH_PASS="$AUTH_PASS" python3 - <<'PY'
 import bcrypt, os
 pw = os.environ["AUTH_PASS"].encode()
@@ -25,10 +26,9 @@ case "$UPSTREAM_URL" in
   *) UPSTREAM="http://$UPSTREAM_URL" ;;
 esac
 
-# Always exempt /api/health so a container healthcheck (no Authorization
-# header) can reach upstream liveness without depending on PUBLIC_PATHS.
-PATH_LINES="		path /api/health
-"
+# Build a single `path a b c` matcher line (OR semantics). Always include
+# /api/health for container healthchecks without credentials.
+PATH_ARGS="/api/health"
 if [ -n "${PUBLIC_PATHS:-}" ]; then
   OLD_IFS=$IFS
   IFS=','
@@ -48,18 +48,17 @@ if [ -n "${PUBLIC_PATHS:-}" ]; then
         exit 1
         ;;
     esac
-    PATH_LINES="${PATH_LINES}		path ${p}
-"
+    # Skip duplicate of the always-public health path.
+    [ "$p" = "/api/health" ] && continue
+    PATH_ARGS="${PATH_ARGS} ${p}"
   done
   IFS=$OLD_IFS
 fi
 
-# Single heredoc — avoid $(…) stripping trailing newlines.
 CONFIG_PATH="/tmp/Caddyfile"
 cat > "$CONFIG_PATH" <<CADDY
 :80 {
-	@public {
-${PATH_LINES}	}
+	@public path ${PATH_ARGS}
 
 	handle @public {
 		reverse_proxy ${UPSTREAM}
@@ -67,7 +66,7 @@ ${PATH_LINES}	}
 
 	handle {
 		basic_auth {
-			${AUTH_USER} ${AUTH_PASS_HASH}
+			{\$AUTH_USER} {\$AUTH_PASS_HASH}
 		}
 		reverse_proxy ${UPSTREAM}
 	}
